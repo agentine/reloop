@@ -8,7 +8,6 @@ disabled because we operate on private attributes and C-level objects.
 from __future__ import annotations
 
 import asyncio
-import asyncio.events
 import asyncio.tasks
 import sys
 import threading
@@ -237,33 +236,57 @@ def _patch_tasks() -> None:
     asyncio.Task = _PyTask
     asyncio.tasks.Task = _PyTask
 
-    # Use _swap_current_task to properly update both C and Python current task state
-    _swap = _asyncio._swap_current_task
     _current_tasks = asyncio.tasks._current_tasks
+    # _swap_current_task was added in Python 3.12
+    _swap = getattr(_asyncio, "_swap_current_task", None)
+    # Fallback for 3.10-3.11: use C _enter_task/_leave_task directly
+    _c_enter = getattr(_asyncio, "_enter_task", None)
+    _c_leave = getattr(_asyncio, "_leave_task", None)
 
     def _enter_task_nested(loop: Any, task: Any) -> None:
-        # Swap at the C level (updates what asyncio.current_task() returns)
-        prev = _swap(loop, task)
-        if prev is not None:
+        current = _current_tasks.get(loop)
+        if current is not None:
             if loop not in _task_stacks:
                 _task_stacks[loop] = []
-            _task_stacks[loop].append(prev)
-        # Also update the Python dict for consistency
+            _task_stacks[loop].append(current)
         _current_tasks[loop] = task
+        # Update C-level state for asyncio.current_task()
+        if _swap is not None:
+            _swap(loop, task)
+        else:
+            # Python 3.10-3.11: try C _enter_task, ignore if already in a task
+            if _c_enter is not None:
+                try:
+                    _c_enter(loop, task)
+                except RuntimeError:
+                    pass
 
     def _leave_task_nested(loop: Any, task: Any) -> None:
-        # Restore previous task from stack, or clear
         if loop in _task_stacks and _task_stacks[loop]:
             prev = _task_stacks[loop].pop()
             if not _task_stacks[loop]:
                 del _task_stacks[loop]
         else:
             prev = None
-        _swap(loop, prev)
         if prev is not None:
             _current_tasks[loop] = prev
         else:
             _current_tasks.pop(loop, None)
+        # Update C-level state
+        if _swap is not None:
+            _swap(loop, prev)
+        else:
+            # Python 3.10-3.11: try C _leave_task, then enter previous
+            if _c_leave is not None:
+                try:
+                    _c_leave(loop, task)
+                except (RuntimeError, ValueError):
+                    pass
+            if prev is not None and _c_enter is not None:
+                try:
+                    _c_enter(loop, prev)
+                except RuntimeError:
+                    pass
 
     # Patch the module-level names that _PyTask.__step references
     asyncio.tasks._py_enter_task = _enter_task_nested
