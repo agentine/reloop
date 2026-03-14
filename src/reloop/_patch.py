@@ -225,29 +225,39 @@ def _patch_run() -> None:
 
 def _patch_tasks() -> None:
     """Patch Task to use Python implementation and support nested enter/leave."""
+    import _asyncio
+
     # Use the pure-Python Task so we can intercept _enter_task/_leave_task.
     # The C Task calls _enter_task at the C level, bypassing our patches.
     _PyTask = asyncio.tasks._PyTask  # type: ignore[attr-defined]
     asyncio.Task = _PyTask  # type: ignore[assignment]
     asyncio.tasks.Task = _PyTask  # type: ignore[assignment]
 
+    # Use _swap_current_task to properly update both C and Python current task state
+    _swap = _asyncio._swap_current_task
     _current_tasks = asyncio.tasks._current_tasks  # type: ignore[attr-defined]
 
     def _enter_task_nested(loop: Any, task: Any) -> None:
-        current = _current_tasks.get(loop)
-        if current is not None:
-            # Save current task to the stack for this loop
+        # Swap at the C level (updates what asyncio.current_task() returns)
+        prev = _swap(loop, task)
+        if prev is not None:
             if loop not in _task_stacks:
                 _task_stacks[loop] = []
-            _task_stacks[loop].append(current)
+            _task_stacks[loop].append(prev)
+        # Also update the Python dict for consistency
         _current_tasks[loop] = task
 
     def _leave_task_nested(loop: Any, task: Any) -> None:
         # Restore previous task from stack, or clear
         if loop in _task_stacks and _task_stacks[loop]:
-            _current_tasks[loop] = _task_stacks[loop].pop()
+            prev = _task_stacks[loop].pop()
             if not _task_stacks[loop]:
                 del _task_stacks[loop]
+        else:
+            prev = None
+        _swap(loop, prev)
+        if prev is not None:
+            _current_tasks[loop] = prev
         else:
             _current_tasks.pop(loop, None)
 
