@@ -69,13 +69,41 @@ reloop.apply()
 reloop.revert()  # restore original asyncio behavior
 ```
 
-## API
+## API Reference
 
-| Function | Description |
-|---|---|
-| `reloop.apply()` | Patch asyncio to allow nested event loops. Idempotent. Thread-safe. |
-| `reloop.revert()` | Undo all patches. Idempotent. Thread-safe. |
-| `reloop.applied()` | Context manager: patches on enter, reverts on exit. |
+### `reloop.apply() -> None`
+
+Patch asyncio to allow nested event loops.
+
+- **Idempotent** — safe to call multiple times; subsequent calls are no-ops.
+- **Thread-safe** — concurrent calls from multiple threads are safe.
+
+```python
+import reloop
+reloop.apply()
+```
+
+### `reloop.revert() -> None`
+
+Undo all asyncio patches, restoring original stdlib behavior.
+
+- **Idempotent** — safe to call multiple times; subsequent calls are no-ops.
+- **Thread-safe** — concurrent calls from multiple threads are safe.
+
+```python
+reloop.revert()
+```
+
+### `reloop.applied() -> contextmanager`
+
+Context manager that calls `apply()` on entry and `revert()` on exit. Use this when you want nested loop support scoped to a block rather than process-wide.
+
+```python
+with reloop.applied():
+    asyncio.run(outer())  # nested loops work here
+
+asyncio.run(outer())  # raises RuntimeError again after the block
+```
 
 ## Migration from nest-asyncio
 
